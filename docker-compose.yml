@@ -1,0 +1,108 @@
+version: "3.9"
+
+# Default: prod-like profile (builds images, runs production commands)
+# Optional dev overrides can be placed in docker-compose.dev.yml (see README)
+
+services:
+  db:
+    image: postgres:16
+    container_name: viewit-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-viewit}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-viewit}
+      POSTGRES_DB: ${POSTGRES_DB:-viewit}
+    ports:
+      - "5432:5432"
+    volumes:
+      - db_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  server:
+    build:
+      context: ./apps/server
+      dockerfile: Dockerfile
+    container_name: viewit-server
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      # Compose service DNS name "db"
+      DATABASE_URL: postgres://${POSTGRES_USER:-viewit}:${POSTGRES_PASSWORD:-viewit}@db:5432/${POSTGRES_DB:-viewit}?schema=public
+      JWT_SECRET: ${JWT_SECRET:-local-dev-jwt-secret-change-me}
+      IPTV_ENC_KEY: ${IPTV_ENC_KEY:-00000000000000000000000000000000}
+      PORT: "3001"
+      NODE_ENV: production
+    ports:
+      - "3001:3001"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:3001/health > /dev/null || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    # Default (prod-like)
+    command: ["node", "dist/index.js"]
+    profiles: ["prod"]
+
+  web:
+    build:
+      context: ./apps/web
+      dockerfile: Dockerfile
+      args:
+        # Build-time env for Vite
+        VITE_API_BASE_URL: ${VITE_API_BASE_URL:-http://server:3001}
+        VITE_FEATURE_MOCK: ${VITE_FEATURE_MOCK:-0}
+    container_name: viewit-web
+    depends_on:
+      - server
+    environment:
+      # Runtime env not strictly necessary for vite preview, but kept for clarity
+      VITE_API_BASE_URL: ${VITE_API_BASE_URL:-http://server:3001}
+      VITE_FEATURE_MOCK: ${VITE_FEATURE_MOCK:-0}
+    ports:
+      - "5173:4173" # external 5173 mapped to preview 4173
+    profiles: ["prod"]
+
+  # Optional dev profile using the same images with dev commands.
+  # To enable, run with: docker compose --profile dev up -d
+  server-dev:
+    build:
+      context: ./apps/server
+      dockerfile: Dockerfile
+    container_name: viewit-server-dev
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER:-viewit}:${POSTGRES_PASSWORD:-viewit}@db:5432/${POSTGRES_DB:-viewit}?schema=public
+      JWT_SECRET: ${JWT_SECRET:-local-dev-jwt-secret-change-me}
+      IPTV_ENC_KEY: ${IPTV_ENC_KEY:-00000000000000000000000000000000}
+      PORT: "3001"
+      NODE_ENV: development
+    ports:
+      - "3001:3001"
+    command: ["npm", "run", "dev"]
+    profiles: ["dev"]
+
+  web-dev:
+    build:
+      context: ./apps/web
+      dockerfile: Dockerfile
+    container_name: viewit-web-dev
+    depends_on:
+      - server-dev
+    environment:
+      VITE_API_BASE_URL: http://server-dev:3001
+      VITE_FEATURE_MOCK: ${VITE_FEATURE_MOCK:-0}
+    ports:
+      - "5173:5173"
+    command: ["npm", "run", "dev", "--", "--host", "0.0.0.0", "--port", "5173"]
+    profiles: ["dev"]
+
+volumes:
+  db_data:
